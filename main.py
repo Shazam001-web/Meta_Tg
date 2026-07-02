@@ -1,13 +1,201 @@
+# ========================================================================
+# TELEGRAM MASS REPORT SWARM — By: Dev Shazam
+# python 3.10+ | pyrogram
+# ========================================================================
+#
+# First run: logs in interactively, saves session for reuse.
+# Subsequent runs: loads saved session automatically.
+# Optionally load more .session files from ./sessions/ for extra firepower.
+#
+# Requirements:
+#   pip install pyrogram tgcrypto
+#
+# Get API_ID and API_HASH at https://my.telegram.org/apps
+
+import asyncio
+import random
+import time
+import os
+import glob
+from typing import List, Optional
+from datetime import datetime
+
+from pyrogram import Client
+from pyrogram.errors import (
+    FloodWait, PeerIdInvalid, UsernameNotOccupied,
+    UserIdInvalid, RPCError
+)
+
+# ========================================================================
+# CONFIGURATION
+# ========================================================================
+
+TARGET_USERNAME = "target_username_here"  # @username — no @ needed
+REPORT_REASON = "spam"  # Options: spam, violence, child_abuse, copyright, illegal, other
+
+# Telegram official report usernames/chats
+REPORT_CHATS = [
+    "Telegram",           # Official Telegram channel
+    "TelegramTips",       # Alternative contact
+    "t.me/abuse",         # Abuse submission channel
+    "t.me/notadmin",      # Moderation contact
+    "t.me/tgc",           # Telegram community moderators
+]
+
+# How many reports to send per session per interval
+REPORTS_PER_SESSION = 5
+
+# Delay range between individual reports (seconds)
+REPORT_DELAY_MIN = 3
+REPORT_DELAY_MAX = 7
+
+# Delay between report rounds for each session (seconds)
+ROUND_DELAY_MIN = 20
+ROUND_DELAY_MAX = 40
+
+# Total runtime target (seconds) — aim for under 45 minutes (2700s)
+TOTAL_RUNTIME = 2700
+
+# Session directory for optional extra accounts
+SESSION_DIR = "./sessions/"
+SESSION_PATTERN = "*.session"
+
+# Proxy file (optional) — one per line: protocol://user:pass@ip:port
+PROXY_FILE = "./proxies.txt"
+
+# Saved session file for primary account
+SESSION_FILE = "session_string.txt"
+
+# ========================================================================
+# UTILITY FUNCTIONS
+# ========================================================================
+
+def load_proxies(filepath: str) -> List[str]:
+    """Load proxies from file."""
+    if not os.path.exists(filepath):
+        return []
+    with open(filepath, 'r') as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+def get_session_files(directory: str, pattern: str) -> List[str]:
+    """Get all .session files in directory."""
+    return glob.glob(os.path.join(directory, pattern))
+
+def parse_proxy(proxy_str: str) -> Optional[dict]:
+    """Parse proxy string into Pyrogram proxy dict."""
+    try:
+        proto, rest = proxy_str.split('://', 1)
+        if '@' in rest:
+            auth, addr = rest.rsplit('@', 1)
+            user, pw = auth.split(':', 1)
+            ip, port = addr.split(':', 1)
+        else:
+            user, pw = None, None
+            ip, port = rest.split(':', 1)
+        
+        return {
+            "scheme": proto,
+            "hostname": ip,
+            "port": int(port),
+            "username": user,
+            "password": pw
+        }
+    except Exception as e:
+        print(f"  [x] Failed to parse proxy: {proxy_str} — {e}")
+        return None
+
+# ========================================================================
+# CLIENT CREATION (for additional .session files)
+# ========================================================================
+
+async def create_client(session_name: str, proxy: Optional[dict] = None) -> Optional[Client]:
+    """Create a Pyrogram client from a .session file."""
+    try:
+        client = Client(
+            name=session_name.replace('.session', ''),
+            workdir=SESSION_DIR,
+            proxy=proxy,
+            in_memory=False
+        )
+        await client.start()
+        me = await client.get_me()
+        print(f"  [+] Logged in as @{me.username or me.id} (ID: {me.id})")
+        return client
+    except Exception as e:
+        print(f"  [x] Failed to start session {session_name}: {e}")
+        return None
+
+# ========================================================================
+# TARGET RESOLVER
+# ========================================================================
+
+async def resolve_target(client: Client, target: str) -> Optional[int]:
+    """Resolve target username or ID to user ID."""
+    try:
+        if target.startswith('@'):
+            target = target[1:]
+        user = await client.get_users(target)
+        print(f"  [i] Resolved @{target} → ID: {user.id}")
+        return user.id
+    except (UsernameNotOccupied, PeerIdInvalid):
+        try:
+            user = await client.get_users(int(target))
+            return user.id
+        except:
+            return None
+    except Exception as e:
+        print(f"  [x] Resolution error: {e}")
+        return None
+
+# ========================================================================
+# REPORT ENGINE
+# ========================================================================
+
+async def send_report(client: Client, target_id: int, report_chat: str) -> bool:
+    """Send a report to a Telegram moderation chat about the target."""
+    report_messages = [
+        f"⚠️ I am reporting this account.\nUser ID: {target_id}\nUsername: @{TARGET_USERNAME}\nReason: {REPORT_REASON}\nThis account is engaging in {REPORT_REASON} behavior.",
+        f"🚨 Report abuse\nAccount: @{TARGET_USERNAME}\nID: {target_id}\nIssue: {REPORT_REASON}\nPlease review and take action.",
+        f"🛑 Violation report\nTarget: @{TARGET_USERNAME} ({target_id})\nType: {REPORT_REASON}\nEvidence: Multiple users flagging this account.",
+        f"📋 Moderator attention\n@{TARGET_USERNAME}\nThis account needs to be reviewed for {REPORT_REASON} violations.",
+        f"❗️ Official report\nTo: Telegram Team\nSubject: Account violation\nAccount: @{TARGET_USERNAME} ({target_id})\nViolation: {REPORT_REASON}\nAction requested: Ban/restrict this account.",
+    ]
+    
+    msg = random.choice(report_messages)
+    
+    try:
+        chat = await client.get_chat(report_chat)
+        await client.send_message(chat.id, msg, disable_notification=True)
+        return True
+    except FloodWait as e:
+        print(f"  [~] Flood wait {e.value}s — waiting...")
+        await asyncio.sleep(e.value)
+        return False
+    except PeerIdInvalid:
+        return False
+    except Exception as e:
+        print(f"  [x] Report send error: {e}")
+        return False
+
+async def report_cycle(client: Client, target_id: int, report_chats: List[str]) -> dict:
+    """Run a complete report cycle for one session."""
+    stats = {"sent": 0, "failed": 0}
+    
+    for chat in report_chats:
+        for i in range(REPORTS_PER_SESSION):
+            success = await send_report(client, target_id, chat)
+            if success:
+                stats["sent"] += 1
+            else:
+                stats["failed"] += 1
+            await asyncio.sleep(random.uniform(REPORT_DELAY_MIN, REPORT_DELAY_MAX))
+        await asyncio.sleep(random.uniform(1, 3))
+    
+    return stats
 
 # ========================================================================
 # SINGLE-ACCOUNT LOGIN + SWARM LAUNCH
 # ========================================================================
-
-import sys
-import json
-from pathlib import Path
-
-SESSION_FILE = "session_string.txt"  # Stores the logged-in session as a string
 
 async def login_or_load() -> Optional[Client]:
     """
@@ -15,7 +203,6 @@ async def login_or_load() -> Optional[Client]:
     Subsequent runs: load saved string session.
     Returns an authenticated Client.
     """
-    # If we already have a saved session, try to load it
     if os.path.exists(SESSION_FILE):
         print("[*] Found saved session. Attempting to load...")
         try:
@@ -34,7 +221,8 @@ async def login_or_load() -> Optional[Client]:
         except Exception as e:
             print(f"  [!] Saved session invalid or expired: {e}")
             print("  [!] Will re-login.\n")
-            os.remove(SESSION_FILE)  # Clean up bad session
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
     
     # --- First-time login flow ---
     print("\n" + "="*50)
@@ -45,7 +233,6 @@ async def login_or_load() -> Optional[Client]:
     print("⚠️  Your account may get rate-limited or banned.")
     print("    Proceed only if you understand the risk.\n")
     
-    # Get API credentials
     api_id = input("Enter your API ID (from my.telegram.org): ").strip()
     api_hash = input("Enter your API HASH (from my.telegram.org): ").strip()
     
@@ -59,27 +246,17 @@ async def login_or_load() -> Optional[Client]:
         print("[!] API ID must be a number.")
         return None
     
-    # Create temporary client to log in
-    client = Client(
-        name="swarm_login",
-        api_id=api_id,
-        api_hash=api_hash,
-        in_memory=True
-    )
-    
+    client = Client(name="swarm_login", api_id=api_id, api_hash=api_hash, in_memory=True)
     await client.start()
     
-    # Send code
     phone = input("Enter your phone number (with country code, e.g. +1234567890): ").strip()
     sent_code = await client.send_code(phone)
     
-    # Wait for OTP
     code = input("Enter the code Telegram sent you: ").strip()
     try:
         await client.sign_in(phone, sent_code.phone_code_hash, code)
     except Exception as e:
         print(f"[!] Login failed: {e}")
-        # Maybe 2FA?
         if "Two-factor" in str(e) or "password" in str(e).lower():
             password = input("Enter your 2FA password: ").strip()
             await client.check_password(password)
@@ -89,7 +266,6 @@ async def login_or_load() -> Optional[Client]:
     me = await client.get_me()
     print(f"\n  [+] Logged in as @{me.username or me.id} (ID: {me.id})")
     
-    # Save session string for future runs
     session_string = await client.export_session_string()
     with open(SESSION_FILE, "w") as f:
         f.write(session_string)
@@ -102,17 +278,17 @@ async def run_swarm():
     """Coordinate mass reporting with one or more sessions."""
     
     print(f"""
-╔══════════════════════════════════════╗
-║    TELEGRAM MASS REPORT       ║By: Dev shazam
-║    Target: @{TARGET_USERNAME}               ║
-║    Target runtime: {TOTAL_RUNTIME//60} min         ║
-╚══════════════════════════════════════╝
+╔══════════════════════════════════════════╗
+║    TELEGRAM MASS REPORT SWARM            ║
+║    By: Dev Shazam                        ║
+║    Target: @{TARGET_USERNAME}                     ║
+║    Target runtime: {TOTAL_RUNTIME//60} min               ║
+╚══════════════════════════════════════════╝
     """)
     
     # --- Step 1: Login or load saved session ---
     primary_client = await login_or_load()
-
-if not primary_client:
+    if not primary_client:
         print("[!] Could not authenticate. Exiting.")
         return
     
@@ -123,8 +299,7 @@ if not primary_client:
     if session_files:
         print(f"\n[*] Found {len(session_files)} additional session files in {SESSION_DIR}")
         for sess in session_files:
-            proxy = None  # You can add proxy logic here if needed
-            client = await create_client(sess, proxy)
+            client = await create_client(sess)
             if client:
                 clients.append(client)
         print(f"[*] Total sessions: {len(clients)}")
@@ -153,18 +328,13 @@ if not primary_client:
     
     while time.time() < end_time:
         round_num += 1
-        round_start = time.time()
         print(f"\n{'='*50}")
         print(f"[*] Round {round_num} starting — {len(clients)} sessions active")
         print(f"{'='*50}")
         
-        # Run report cycles for all sessions concurrently
         tasks = []
         for client in clients:
-            task = asyncio.create_task(
-                report_cycle(client, target_id, REPORT_CHATS,
-                            f"session_{clients.index(client)}")
-            )
+            task = asyncio.create_task(report_cycle(client, target_id, REPORT_CHATS))
             tasks.append(task)
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -185,7 +355,6 @@ if not primary_client:
         print(f"    Total sent so far: {total_sent}")
         print(f"    Total failed: {total_failed}")
         
-        # Session health check
         alive = [c for c in clients if c.is_connected]
         if len(alive) < len(clients):
             print(f"[!] {len(clients) - len(alive)} sessions died. Continuing with {len(alive)}")
@@ -200,12 +369,9 @@ if not primary_client:
         
         if remaining > 0:
             delay = random.uniform(ROUND_DELAY_MIN, ROUND_DELAY_MAX)
-            if len(clients) < len(session_files) // 2:
-                delay *= 0.5
             print(f"    Next round in {delay:.0f}s...")
             await asyncio.sleep(min(delay, remaining))
     
-    # Summary
     elapsed = TOTAL_RUNTIME - (end_time - time.time())
     print(f"\n{'='*50}")
     print(f"[*] SWARM COMPLETE")
@@ -213,14 +379,17 @@ if not primary_client:
     print(f"[*] Total reports sent: {total_sent}")
     print(f"[*] Total failed: {total_failed}")
     print(f"[*] Target: @{TARGET_USERNAME} (ID: {target_id})")
+    print(f"[*] By: Dev Shazam")
     print(f"{'='*50}")
     
     for c in clients:
         await c.stop()
     print("\n[*] All sessions stopped.")
 
-if name == "main":
+
+if __name__ == "__main__":
     print("[*] Initializing Telegram Mass Report Swarm...")
+    print("[*] By: Dev Shazam")
     print("[*] Press Ctrl+C to abort at any time\n")
     
     try:
@@ -231,3 +400,4 @@ if name == "main":
         print(f"\n[x] Fatal error: {e}")
         import traceback
         traceback.print_exc()
+
